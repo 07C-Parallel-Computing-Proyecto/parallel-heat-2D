@@ -7,8 +7,7 @@
 #define min(A,B) ((A) < (B) ? (A) : (B))
 #define max(A,B) ((A) > (B) ? (A) : (B))
 
-const int imax = 80;
-const int kmax = 80;
+const int n     = 80;
 const int itmax = 20000;
 
 int main(int argc, char* argv[])
@@ -23,8 +22,8 @@ int main(int argc, char* argv[])
     double eps = 1.0e-08;
     double dx, dy, dx2, dy2, dx2i, dy2i, dt;
 
-    dx  = 1.0 / kmax;
-    dy  = 1.0 / imax;
+    dx  = 1.0 / n;
+    dy  = 1.0 / n;
     dx2 = dx * dx;
     dy2 = dy * dy;
     dx2i = 1.0 / dx2;
@@ -32,7 +31,7 @@ int main(int argc, char* argv[])
     dt   = min(dx2, dy2) / 4.0;
 
     // fase 1: Descomposición desigual
-    int n_interior = imax - 1;          // filas interiores globales (1..imax-1)
+    int n_interior = n - 1;             // filas interiores globales (1..n-1)
     int base = n_interior / p;
     int rem  = n_interior % p;
 
@@ -47,46 +46,38 @@ int main(int argc, char* argv[])
     int i_end = i_start + local_rows - 1;
 
     // fase 2: Memoria con halos
-    // phi[0..local_rows+1][0..kmax]  (halos en filas 0 y local_rows+1)
-    // Índice lineal: fila il → il*(kmax+1)+k
+    // phi[0..local_rows+1][0..n]  (halos en filas 0 y local_rows+1)
+    // Índice lineal: fila il → il*(n+1)+k
     int rows_with_halo = local_rows + 2;
-    double* phi  = new double[rows_with_halo * (kmax + 1)]();
-    double* phin = new double[rows_with_halo * (kmax + 1)]();
+    double* phi  = new double[rows_with_halo * (n + 1)]();
+    double* phin = new double[rows_with_halo * (n + 1)]();
 
-    auto PHI  = [&](int il, int k) -> double& { return phi [il*(kmax+1)+k]; };
-    auto PHIN = [&](int il, int k) -> double& { return phin[il*(kmax+1)+k]; };
+    auto PHI  = [&](int il, int k) -> double& { return phi [il*(n+1)+k]; };
+    auto PHIN = [&](int il, int k) -> double& { return phin[il*(n+1)+k]; };
 
-    // condiciones de frontera globales
-    // frontera superior (i=0): phi[i=0][k] — solo proceso 0 tiene la fila halo superior real
-    // frontera inferior (i=imax): phi[i=imax][k] = 1.0 para k = kmax, etc.
-
-    // borde k=kmax (derecha): phi[i][kmax] = 1.0 para todos
+    // borde k=n (derecha): phi[i][n] = 1.0 para todos
     for (int il = 0; il < rows_with_halo; il++)
-        PHI(il, kmax) = 1.0;
-
-    // borde k=0 (izquierda): phi[i][0] crece linealmente
-    // phi[0][0]=0, phi[imax][0]=0; para 1<=i<=imax-1 phi[i][0] se inicializa 0
-    // (el serial no aplica condición especial en k=0 para i interior, queda 0)
+        PHI(il, n) = 1.0;
 
     // proceso 0: halo superior (fila global i=0)
     if (s == 0) {
         PHI(0, 0) = 0.0;
-        for (int k = 1; k < kmax; k++)
+        for (int k = 1; k < n; k++)
             PHI(0, k) = PHI(0, k-1) + dx;   // phi[0][k] = k*dx
-        PHI(0, kmax) = 1.0;
+        PHI(0, n) = 1.0;
     }
 
-    // proceso p-1 halo inferior (fila global i=imax)
+    // proceso p-1: halo inferior (fila global i=n)
     if (s == p - 1) {
         PHI(local_rows + 1, 0) = 0.0;
-        for (int k = 1; k < kmax; k++)
+        for (int k = 1; k < n; k++)
             PHI(local_rows + 1, k) = PHI(local_rows + 1, k-1) + dx;
-        PHI(local_rows + 1, kmax) = 1.0;
+        PHI(local_rows + 1, n) = 1.0;
     }
 
     // fase 3: Tipo derivado MPI
     MPI_Datatype T_fila;
-    MPI_Type_contiguous(kmax + 1, MPI_DOUBLE, &T_fila);
+    MPI_Type_contiguous(n + 1, MPI_DOUBLE, &T_fila);
     MPI_Type_commit(&T_fila);
 
     MPI_Request req[4];
@@ -109,12 +100,10 @@ int main(int argc, char* argv[])
 
         // comunicacion no bloqueante
         if (s > 0) {
-            // enviar fila 1 al proceso s-1; recibir halo superior (fila 0)
             MPI_Isend(&PHI(1, 0), 1, T_fila, s-1, 0, MPI_COMM_WORLD, &req[nreq++]);
             MPI_Irecv(&PHI(0, 0), 1, T_fila, s-1, 1, MPI_COMM_WORLD, &req[nreq++]);
         }
         if (s < p - 1) {
-            // enviar ultima fila local al proceso s+1 recibir halo inferior
             MPI_Isend(&PHI(local_rows, 0),   1, T_fila, s+1, 1, MPI_COMM_WORLD, &req[nreq++]);
             MPI_Irecv(&PHI(local_rows+1, 0), 1, T_fila, s+1, 0, MPI_COMM_WORLD, &req[nreq++]);
         }
@@ -122,7 +111,7 @@ int main(int argc, char* argv[])
         // computo interior (filas que NO dependen de halos)
         if (local_rows > 2) {
             for (int il = 2; il <= local_rows - 1; il++) {
-                for (int k = 1; k < kmax; k++) {
+                for (int k = 1; k < n; k++) {
                     double dphi = (PHI(il+1,k) + PHI(il-1,k) - 2.0*PHI(il,k)) * dy2i
                                 + (PHI(il,k+1) + PHI(il,k-1) - 2.0*PHI(il,k)) * dx2i;
                     dphi *= dt;
@@ -139,11 +128,10 @@ int main(int argc, char* argv[])
         int border_rows[2] = {1, local_rows};
         for (int b = 0; b < 2; b++) {
             int il = border_rows[b];
-            // saltar si es frontera global (proceso 0 fila 1, proceso p-1 última fila)
-            if (il == 1       && s == 0)     continue;
-            if (il == local_rows && s == p-1) continue;
+            if (il == 1          && s == 0)     continue;
+            if (il == local_rows && s == p-1)   continue;
 
-            for (int k = 1; k < kmax; k++) {
+            for (int k = 1; k < n; k++) {
                 double dphi = (PHI(il+1,k) + PHI(il-1,k) - 2.0*PHI(il,k)) * dy2i
                             + (PHI(il,k+1) + PHI(il,k-1) - 2.0*PHI(il,k)) * dx2i;
                 dphi *= dt;
@@ -156,9 +144,9 @@ int main(int argc, char* argv[])
         MPI_Allreduce(&dphimax_local, &dphimax_global, 1,
                       MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
 
-        // actualización
+        // actualizacion
         for (int il = 1; il <= local_rows; il++)
-            for (int k = 1; k < kmax; k++)
+            for (int k = 1; k < n; k++)
                 PHI(il, k) = PHIN(il, k);
 
         if (dphimax_global < eps) break;
@@ -171,7 +159,7 @@ int main(int argc, char* argv[])
         printf("Tiempo MPI = %#12.4g seg\n", t_elapsed);
     }
 
-    // fase final 
+    // fase final
     MPI_Type_free(&T_fila);
     delete[] phi;
     delete[] phin;

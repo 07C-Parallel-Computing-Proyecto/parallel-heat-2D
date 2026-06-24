@@ -1,1 +1,59 @@
+# Archivos compilados
+*.o
+*.obj
+*.so
+*.dll
+*.dylib
+*.a
+*.lib
+*.exe
+*.out
+
+# Archivos de depuración
+*.pdb
+*.idb
+
+# Archivos temporales
+*.tmp
+*.temp
+*.log
+
+# Carpetas de compilación
+build/
+bin/
+dist/
+Debug/
+Release/
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+compile_commands.json
+CTestTestfile.cmake
+Testing/
+
+# Visual Studio
+.vs/
+*.vcxproj.user
+*.suo
+
+# VS Code
+.vscode/
+
+# CLion / JetBrains
+.idea/
+
+# Qt
+*.pro.user
+moc_*
+ui_*.h
+qrc_*.cpp
+
+# Archivos del sistema
+.DS_Store
+Thumbs.db
 a
+b
+heat_s.cpp
