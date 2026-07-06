@@ -2,13 +2,11 @@
 #include <ctime>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <mpi.h>
 
 #define min(A,B) ((A) < (B) ? (A) : (B))
 #define max(A,B) ((A) > (B) ? (A) : (B))
-
-const int n     = 80;
-const int itmax = 20000;
 
 int main(int argc, char* argv[])
 {
@@ -18,6 +16,33 @@ int main(int argc, char* argv[])
     int s, p;
     MPI_Comm_rank(MPI_COMM_WORLD, &s);
     MPI_Comm_size(MPI_COMM_WORLD, &p);
+
+    // n e itmax ahora entran por consola:
+    // mpirun -np <p> ./heat_mpi <n> <itmax>
+    int n = 80;
+    int itmax = 20000;
+
+    if (argc >= 2) n = std::atoi(argv[1]);
+    if (argc >= 3) itmax = std::atoi(argv[2]);
+
+    if (n < 2 || itmax < 1) {
+        if (s == 0) {
+            std::cerr << "Uso: mpirun -np <p> ./heat_mpi <n> <itmax>\n";
+            std::cerr << "Ejemplo: mpirun -np 4 ./heat_mpi 200 20000\n";
+            std::cerr << "Restricciones: n >= 2, itmax >= 1\n";
+        }
+        MPI_Finalize();
+        return 1;
+    }
+
+    if (p > n - 1) {
+        if (s == 0) {
+            std::cerr << "Error: el numero de procesos debe ser <= n-1, "
+                      << "porque solo hay n-1 filas interiores.\n";
+        }
+        MPI_Finalize();
+        return 1;
+    }
 
     double eps = 1.0e-08;
     double dx, dy, dx2, dy2, dx2i, dy2i, dt;
@@ -83,18 +108,33 @@ int main(int argc, char* argv[])
     MPI_Request req[4];
     double dphimax_local, dphimax_global;
     int it;
+    int iterations_done = 0;
+
+    // Conteo de FLOPs del stencil numerico por punto actualizado:
+    // vertical:   (a + b - 2*c) * dy2i  -> 4 FLOPs
+    // horizontal: (d + e - 2*f) * dx2i  -> 4 FLOPs
+    // suma vertical + horizontal         -> 1 FLOP
+    // dphi *= dt                         -> 1 FLOP
+    // phi_new = phi + dphi               -> 1 FLOP
+    // Total aproximado: 11 FLOPs por punto interior actualizado.
+    const long long FLOPS_PER_POINT = 11;
+    const long long local_points = 1LL * local_rows * (n - 1);
+    long long local_flops = 0;
 
     if (s == 0) {
         printf("\nTransmision de calor 2D con MPI\n");
         printf("dx = %12.4g, dy = %12.4g, dt = %12.4g, eps = %12.4g\n",
                dx, dy, dt, eps);
+        printf("n = %d, itmax = %d\n", n, itmax);
         printf("Procesos MPI: %d\n", p);
     }
 
+    MPI_Barrier(MPI_COMM_WORLD);
     double t_start = MPI_Wtime();
 
     // fase 4: iteracion
     for (it = 1; it <= itmax; it++) {
+        iterations_done = it;
         dphimax_local = 0.0;
         int nreq = 0;
 
@@ -125,12 +165,11 @@ int main(int argc, char* argv[])
         MPI_Waitall(nreq, req, MPI_STATUSES_IGNORE);
 
         // computo de fronteras locales (filas 1 y local_rows)
-        int border_rows[2] = {1, local_rows};
-        for (int b = 0; b < 2; b++) {
-            int il = border_rows[b];
-            if (il == 1          && s == 0)     continue;
-            if (il == local_rows && s == p-1)   continue;
-
+        // NOTA: il=1 e il=local_rows son filas interiores globales, no fronteras fijas.
+        // Las fronteras fisicas reales estan en los halos:
+        //   - PHI(0, k) para el proceso 0
+        //   - PHI(local_rows + 1, k) para el ultimo proceso
+        auto compute_local_row = [&](int il) {
             for (int k = 1; k < n; k++) {
                 double dphi = (PHI(il+1,k) + PHI(il-1,k) - 2.0*PHI(il,k)) * dy2i
                             + (PHI(il,k+1) + PHI(il,k-1) - 2.0*PHI(il,k)) * dx2i;
@@ -138,7 +177,13 @@ int main(int argc, char* argv[])
                 dphimax_local = max(dphimax_local, fabs(dphi));
                 PHIN(il, k) = PHI(il, k) + dphi;
             }
-        }
+        };
+
+        if (local_rows >= 1) compute_local_row(1);
+        if (local_rows >= 2) compute_local_row(local_rows);
+
+        // Se actualizan local_rows * (n-1) puntos por iteracion en este proceso.
+        local_flops += FLOPS_PER_POINT * local_points;
 
         // reduccion global del criterio de convergencia
         MPI_Allreduce(&dphimax_local, &dphimax_global, 1,
@@ -154,9 +199,33 @@ int main(int argc, char* argv[])
 
     double t_elapsed = MPI_Wtime() - t_start;
 
+    // Checksum local del resultado final.
+    // Solo se suman las filas interiores reales de cada proceso y las columnas interiores.
+    // No se incluyen halos para evitar duplicar informacion entre procesos vecinos.
+    double local_checksum = 0.0;
+    for (int il = 1; il <= local_rows; il++) {
+        for (int k = 1; k < n; k++) {
+            local_checksum += PHI(il, k);
+        }
+    }
+
+    // El tiempo paralelo correcto es el maximo entre procesos,
+    // porque el programa termina cuando termina el proceso mas lento.
+    double t_max = 0.0;
+    long long global_flops = 0;
+    double global_checksum = 0.0;
+
+    MPI_Reduce(&t_elapsed, &t_max, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&local_flops, &global_flops, 1, MPI_LONG_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&local_checksum, &global_checksum, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+
     if (s == 0) {
-        printf("\n%d iteraciones\n", it);
-        printf("Tiempo MPI = %#12.4g seg\n", t_elapsed);
+        double gflops = global_flops / t_max / 1.0e9;
+        printf("\n%d iteraciones\n", iterations_done);
+        printf("Tiempo MPI max = %#12.4g seg\n", t_max);
+        printf("FLOPs totales  = %lld\n", global_flops);
+        printf("GFLOP/s        = %#12.4g\n", gflops);
+        printf("Checksum phi   = %.12e\n", global_checksum);
     }
 
     // fase final
